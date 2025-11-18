@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  semantic-detector:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+    environment:
+      - OLLAMA_ENDPOINT=http://ollama:11434
+      - DEBUG=false
+    command: python -m semantic_detector.web.app.main
+    depends_on:
+      - ollama
+  
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Uncomment to pull models on startup
+    # command: >
+    #   sh -c "ollama serve & sleep 5 && ollama pull nomic-embed-text"
+
+volumes:
+  ollama_data:
+
