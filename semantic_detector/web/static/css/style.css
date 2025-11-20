@@ -379,3 +379,75 @@ a:hover {
     }
 }
 
+/* Explorer Table Styles */
+#explorer-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+
+#explorer-table thead {
+    position: sticky;
+    top: 0;
+    background: var(--card-bg);
+    z-index: 10;
+}
+
+#explorer-table th {
+    padding: 0.75rem 0.5rem;
+    border: 1px solid var(--border-color);
+    background: var(--bg-color);
+    font-weight: 600;
+    text-align: left;
+}
+
+#explorer-table td {
+    padding: 0.5rem;
+    border: 1px solid var(--border-color);
+    word-wrap: break-word;
+    max-width: 300px;
+}
+
+#explorer-table tbody tr:hover {
+    background: rgba(99, 102, 241, 0.05);
+}
+
+#explorer-table tbody tr.highlighted {
+    background: rgba(99, 102, 241, 0.15);
+}
+
+#explorer-table-container {
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    overflow: auto;
+}
+
+#cluster-filter {
+    min-height: 100px;
+    padding: 0.5rem;
+}
+
+#cluster-filter option {
+    padding: 0.25rem;
+}
+
+/* Distribution Charts */
+.distribution-card {
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.distribution-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+#distribution-charts {
+    margin-top: 1rem;
+}
+
+@media (max-width: 768px) {
+    #distribution-charts {
+        grid-template-columns: 1fr !important;
+    }
+}
+

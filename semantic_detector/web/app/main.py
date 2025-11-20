@@ -25,10 +25,14 @@ from pathlib import Path
 # static/ and templates/ are in semantic_detector/web/
 BASE_DIR = Path(__file__).parent.parent
 STATIC_DIR = BASE_DIR / "static"
+PUBLIC_DIR = BASE_DIR / "public"
 TEMPLATES_DIR = BASE_DIR / "templates"
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# Mount public files (icons, images, etc.)
+if PUBLIC_DIR.exists():
+    app.mount("/public", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
 
 # Templates
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -37,7 +41,12 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
     """Root endpoint."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    # Get base URL for Open Graph tags
+    base_url = str(request.base_url).rstrip('/')
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "base_url": base_url
+    })
 
 
 @app.on_event("startup")

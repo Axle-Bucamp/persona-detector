@@ -2,8 +2,10 @@
 
 import os
 import numpy as np
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import tempfile
+import re
+from collections import Counter
 
 from semantic_detector.core.detector import SemanticDetector
 from semantic_detector.web.app.core.config import settings
@@ -163,6 +165,107 @@ class DetectorService:
         results['fingerprint_summary'] = fp_summary
         
         return results
+    
+    def process_structured_data(
+        self,
+        texts: List[str],
+        n_clusters: Optional[int] = None,
+        clustering_method: str = "kmeans",
+        ollama_endpoint: Optional[str] = None,
+        embedding_model: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Process pre-parsed structured data (from CSV/JSON/regex).
+        
+        Args:
+            texts: List of text strings to analyze
+            n_clusters: Number of clusters
+            clustering_method: Clustering algorithm
+            ollama_endpoint: Optional Ollama endpoint
+            embedding_model: Optional embedding model
+            
+        Returns:
+            Dictionary with analysis results including unified format data
+        """
+        if self.detector is None:
+            self.initialize(ollama_endpoint=ollama_endpoint, embedding_model=embedding_model)
+        elif ollama_endpoint or embedding_model:
+            self.initialize(ollama_endpoint=ollama_endpoint, embedding_model=embedding_model)
+        
+        if not texts:
+            raise ValueError("No texts provided")
+        
+        # Generate embeddings
+        embeddings = self.detector.embedding_generator.generate_embeddings_batch(texts)
+        embeddings_array = np.array(embeddings)
+        
+        # Extract language fingerprints
+        fingerprints = self.detector.fingerprint_extractor.extract_fingerprints_batch(texts)
+        
+        # Perform clustering
+        from semantic_detector.clustering import SpeakerClusterer
+        clusterer = SpeakerClusterer(n_clusters=n_clusters, method=clustering_method)
+        labels = clusterer.fit(fingerprints, embeddings_array)
+        
+        # Get cluster statistics
+        cluster_stats = clusterer.get_cluster_stats(texts)
+        
+        # Generate 3D UMAP coordinates
+        coords_3d = self.detector.visualizer.fit_transform(embeddings_array)
+        
+        # Initialize style finder
+        from semantic_detector.style_finder import StyleFinder
+        style_finder = StyleFinder(embeddings_array, fingerprints, labels)
+        
+        # Build result structure similar to process_text_file
+        result = {
+            'sentences': texts,
+            'labels': labels,
+            'cluster_stats': cluster_stats,
+            'fingerprint_summaries': {},
+            'style_finder': style_finder,
+            'coords_3d': coords_3d
+        }
+        
+        # Get fingerprint summaries per cluster
+        unique_clusters = set(labels)
+        for cluster_id in unique_clusters:
+            cluster_texts = [texts[i] for i, label in enumerate(labels) if label == cluster_id]
+            if cluster_texts:
+                # Get summary for first text in cluster as representative
+                summary = self.detector.fingerprint_extractor.get_fingerprint_summary(cluster_texts[0])
+                result['fingerprint_summaries'][str(cluster_id)] = summary
+        
+        # Enhance with TF-IDF and sentiment
+        result = self._enhance_result(result)
+        
+        # Calculate word frequencies per text
+        word_frequencies = []
+        for text in texts:
+            words = re.findall(r'\b\w+\b', text.lower())
+            word_counts = Counter(words)
+            total_words = len(words)
+            if total_words > 0:
+                word_freq = {word: count / total_words for word, count in word_counts.items()}
+            else:
+                word_freq = {}
+            word_frequencies.append(word_freq)
+        
+        # Get TF-IDF features per text
+        tfidf_features_per_text = []
+        if 'tfidf_matrix' in result:
+            for idx in range(len(texts)):
+                top_features = self.tfidf_analyzer.get_top_features(idx, top_n=10)
+                tfidf_features_per_text.append(top_features)
+        else:
+            tfidf_features_per_text = [[] for _ in texts]
+        
+        # Store for unified formatting
+        result['word_frequencies'] = word_frequencies
+        result['tfidf_features_per_text'] = tfidf_features_per_text
+        
+        self.current_result = result
+        return result
     
     def _enhance_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Enhance result with TF-IDF and sentiment analysis."""

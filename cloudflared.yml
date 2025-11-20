@@ -1,0 +1,14 @@
+# Cloudflare Tunnel configuration
+# Install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/
+# Authenticate: cloudflared tunnel login
+# Create tunnel: cloudflared tunnel create semantic-detector
+# Run: cloudflared tunnel --config cloudflared.yml run
+
+tunnel: semantic-detector
+credentials-file: /root/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: semantic-detector.your-domain.com
+    service: http://localhost:8000
+  - service: http_status:404
+

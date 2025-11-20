@@ -79,6 +79,40 @@ function render3DPlot(coords3d, labels, sentences) {
         };
         
         Plotly.newPlot('plot3d', traces, layout);
+        
+        // Add click handler for table row highlighting
+        const plotDiv = document.getElementById('plot3d');
+        if (plotDiv) {
+            plotDiv.on('plotly_click', function(data) {
+                if (data.points && data.points.length > 0) {
+                    const point = data.points[0];
+                    // Find the original index from the trace
+                    const traceIndex = point.curveNumber;
+                    const pointIndex = point.pointNumber;
+                    
+                    // Get the actual sentence index
+                    // We need to reconstruct the mapping from trace to original indices
+                    const trace = traces[traceIndex];
+                    const clusterLabel = uniqueLabels[traceIndex];
+                    const clusterIndices = coords3d.map((_, i) => i).filter(i => labels[i] === clusterLabel);
+                    
+                    if (pointIndex < clusterIndices.length) {
+                        const sentenceIndex = clusterIndices[pointIndex];
+                        
+                        // Try to highlight in explorer table if available
+                        if (typeof highlightTableRow === 'function') {
+                            highlightTableRow(sentenceIndex);
+                        }
+                        
+                        // Also scroll to results section if explorer table exists
+                        const explorerResults = document.getElementById('explorer-results');
+                        if (explorerResults && !explorerResults.classList.contains('hidden')) {
+                            explorerResults.scrollIntoView({ behavior: 'smooth' });
+                        }
+                    }
+                }
+            });
+        }
     } catch (e) {
         console.error('Error rendering 3D plot:', e);
     }

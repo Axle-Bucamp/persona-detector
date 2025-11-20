@@ -15,6 +15,7 @@ RUN pip install uv
 COPY pyproject.toml ./
 COPY semantic_detector/ ./semantic_detector/
 COPY data/ ./data/
+COPY semantic_detector/web/public/ ./semantic_detector/web/public/ 2>/dev/null || true
 
 # Install dependencies
 RUN uv sync --frozen

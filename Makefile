@@ -18,6 +18,20 @@ docker-build:
 docker-up:
 	docker-compose up
 
+docker-up-detached:
+	docker-compose up -d
+
+docker-down:
+	docker-compose down
+
+cloudflare:
+	@echo "[INFO] Starting Cloudflare tunnel..."
+	@bash start-cloudflare.sh
+
+cloudflare-quick:
+	@echo "[INFO] Starting quick Cloudflare tunnel (no config needed)..."
+	cloudflared tunnel --url http://localhost:8000
+
 clean:
 	find . -type d -name __pycache__ -exec rm -r {} +
 	find . -type f -name "*.pyc" -delete

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     
     # File upload settings
     max_upload_size: int = 10 * 1024 * 1024  # 10MB
-    allowed_extensions: list[str] = [".txt", ".md"]
+    allowed_extensions: list[str] = [".txt", ".md", ".csv", ".json", ".pdf"]
     
     # Processing settings
     default_clustering_method: str = "kmeans"

@@ -127,3 +127,43 @@ class StyleSearchResponse(BaseModel):
     out_cluster_matches: List[StyleMatch]
     fingerprint_summary: FingerprintSummary
 
+
+class ParseRequest(BaseModel):
+    """Request model for parsing structured data."""
+    
+    format_type: str = Field(..., description="Format type: csv, json, or regex")
+    text_column: Optional[str] = Field(None, description="CSV column name")
+    jsonpath: Optional[str] = Field(None, description="JSONPath expression for JSON")
+    regex_pattern: Optional[str] = Field(None, description="Regex pattern for regex parser")
+    use_capture_group: bool = Field(False, description="Use capture groups for regex")
+
+
+class ParseResponse(BaseModel):
+    """Response model for parsed data preview."""
+    
+    success: bool
+    message: str
+    texts: List[str]
+    metadata: Dict[str, Any]
+    preview_rows: List[Dict[str, Any]] = Field(default_factory=list, description="First 10 rows for preview")
+
+
+class ExplorerAnalysisResponse(BaseModel):
+    """Response model for explorer analysis results."""
+    
+    success: bool
+    message: str
+    unified_data: List[Dict[str, Any]]
+    num_rows: int
+    num_clusters: int
+    cluster_ids: List[int]
+    coords_3d: Optional[List[List[float]]] = None
+    sentences: Optional[List[str]] = None
+    metadata: Dict[str, Any]
+
+
+class ExportRequest(BaseModel):
+    """Request model for CSV export."""
+    
+    cluster_ids: Optional[List[int]] = Field(None, description="Filter by cluster IDs")
+    include_columns: Optional[List[str]] = Field(None, description="Columns to include")
