@@ -34,22 +34,22 @@ class SpeakerClusterer:
         Fit clustering model.
         
         Args:
-            features: Language fingerprint features
-            embeddings: Optional embedding vectors to combine with features
+            features: Language fingerprint features (deprecated - kept for backward compatibility)
+            embeddings: Embedding vectors (primary clustering input)
+        
+        Note: Clustering now uses embeddings only. Features parameter is kept for backward compatibility
+        but is ignored when embeddings are provided.
         """
-        # Combine features and embeddings if both provided
-        if embeddings is not None and features is not None:
-            # Normalize embeddings
+        # Use embeddings only if provided (new approach)
+        if embeddings is not None:
+            # Normalize embeddings (L2 normalization)
             embeddings_norm = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
-            # Combine (weight embeddings more heavily)
-            combined = np.hstack([
-                self.scaler.fit_transform(features),
-                embeddings_norm * 0.7
-            ])
-        elif embeddings is not None:
-            combined = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
-        else:
+            combined = embeddings_norm
+        elif features is not None:
+            # Fallback to features if no embeddings (backward compatibility)
             combined = self.scaler.fit_transform(features)
+        else:
+            raise ValueError("Either embeddings or features must be provided")
         
         # Determine number of clusters if not specified
         n_clusters = self.n_clusters
@@ -90,8 +90,8 @@ class SpeakerClusterer:
         Predict cluster labels for new data.
         
         Args:
-            features: Language fingerprint features
-            embeddings: Optional embedding vectors
+            features: Language fingerprint features (deprecated - kept for backward compatibility)
+            embeddings: Embedding vectors (primary input)
             
         Returns:
             Cluster labels
@@ -99,17 +99,15 @@ class SpeakerClusterer:
         if self.clusterer is None:
             raise ValueError("Model must be fitted first")
         
-        # Combine features and embeddings
-        if embeddings is not None and features is not None:
+        # Use embeddings only if provided (matching fit() behavior)
+        if embeddings is not None:
             embeddings_norm = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
-            combined = np.hstack([
-                self.scaler.transform(features),
-                embeddings_norm * 0.7
-            ])
-        elif embeddings is not None:
-            combined = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
-        else:
+            combined = embeddings_norm
+        elif features is not None:
+            # Fallback to features if no embeddings (backward compatibility)
             combined = self.scaler.transform(features)
+        else:
+            raise ValueError("Either embeddings or features must be provided")
         
         if hasattr(self.clusterer, 'predict'):
             return self.clusterer.predict(combined)

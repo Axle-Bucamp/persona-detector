@@ -58,11 +58,55 @@ class SemanticDetector:
         Returns:
             Dictionary with results
         """
+        # Import parse_raw_text for sanitization (with fallback)
+        try:
+            from semantic_detector.web.app.core.text_utils import parse_raw_text
+        except ImportError:
+            # Fallback function if import fails
+            import unicodedata
+            import re
+            import string
+            PRINTABLE_ASCII = set(string.printable)
+            SAFE_UNICODE_CATEGORIES = {'L', 'N', 'P', 'S', 'Z'}
+            def parse_raw_text(text):
+                if text is None:
+                    return ''
+                if not isinstance(text, str):
+                    try:
+                        text = str(text)
+                    except Exception:
+                        return ''
+                try:
+                    text = unicodedata.normalize('NFKC', text)
+                except Exception:
+                    try:
+                        text = text.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                    except Exception:
+                        return ''
+                text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', text)
+                text = re.sub(r'[\u200B-\u200D\uFEFF\u2060]', '', text)
+                text = re.sub(r'[\u202A-\u202E\u2066-\u2069]', '', text)
+                cleaned_chars = []
+                for char in text:
+                    if char in PRINTABLE_ASCII:
+                        cleaned_chars.append(char)
+                    elif unicodedata.category(char)[0] in SAFE_UNICODE_CATEGORIES:
+                        try:
+                            if char.isprintable() or char.isspace():
+                                cleaned_chars.append(char)
+                        except Exception:
+                            continue
+                text = ''.join(cleaned_chars)
+                text = re.sub(r'[ \t]+', ' ', text)
+                return text.strip()
+        
         print(f"[INFO] Processing file: {file_path}")
         
-        # Step 1: Split into sentences
+        # Step 1: Split into sentences (with safe encoding)
         print("[INFO] Step 1: Splitting text into sentences...")
         sentences = self.sentence_splitter.split_file(file_path)
+        # Sentences are already sanitized in split_file, but ensure they're safe
+        sentences = [parse_raw_text(str(s)) for s in sentences]
         print(f"[INFO] Found {len(sentences)} sentences")
         
         if len(sentences) == 0:
@@ -79,10 +123,11 @@ class SemanticDetector:
         fingerprints = self.fingerprint_extractor.extract_fingerprints_batch(sentences)
         print(f"[INFO] Extracted {len(fingerprints)} fingerprints with {fingerprints.shape[1]} features")
         
-        # Step 4: Perform clustering
-        print("[INFO] Step 4: Clustering texts...")
+        # Step 4: Perform clustering (using embeddings only)
+        print("[INFO] Step 4: Clustering texts using embeddings...")
         self.clusterer = SpeakerClusterer(n_clusters=n_clusters, method=clustering_method)
-        labels = self.clusterer.fit(fingerprints, embeddings_array)
+        # Pass dummy features, embeddings will be used for clustering
+        labels = self.clusterer.fit(np.zeros((len(sentences), 1)), embeddings_array)
         print(f"[INFO] Identified {len(set(labels))} clusters")
         
         # Get cluster statistics
@@ -157,9 +202,9 @@ class SemanticDetector:
                 comparison = style_finder.compare_clusters(c1, c2)
                 style_comparisons[f"{c1}_vs_{c2}"] = comparison
         
-        # Save metadata with fingerprint summaries
+        # Save metadata with fingerprint summaries (sanitize all text fields)
         metadata = {
-            'file': file_path,
+            'file': parse_raw_text(file_path),
             'num_sentences': len(sentences),
             'num_clusters': len(set(labels)),
             'cluster_stats': {
@@ -173,24 +218,24 @@ class SemanticDetector:
             'fingerprint_dim': int(fingerprints.shape[1]),
             'fingerprint_summaries': {
                 str(k): {
-                    'top_words': v['top_words'],
-                    'top_bigrams': v['top_bigrams'],
-                    'top_trigrams': v['top_trigrams'],
-                    'avg_sentence_length': float(v['avg_sentence_length']),
-                    'vocab_richness': float(v['vocab_richness']),
+                    'top_words': [parse_raw_text(str(w)) if isinstance(w, str) else str(w) for w in v.get('top_words', [])],
+                    'top_bigrams': [parse_raw_text(str(b)) if isinstance(b, str) else str(b) for b in v.get('top_bigrams', [])],
+                    'top_trigrams': [parse_raw_text(str(t)) if isinstance(t, str) else str(t) for t in v.get('top_trigrams', [])],
+                    'avg_sentence_length': float(v.get('avg_sentence_length', 0)),
+                    'vocab_richness': float(v.get('vocab_richness', 0)),
                 }
                 for k, v in fingerprint_summaries.items()
             },
             'style_comparisons': {
-                k: {kk: float(vv) for kk, vv in v.items()}
+                parse_raw_text(str(k)): {parse_raw_text(str(kk)): float(vv) for kk, vv in v.items()}
                 for k, v in style_comparisons.items()
             },
-            'output_files': output_files,
+            'output_files': {k: parse_raw_text(str(v)) for k, v in output_files.items()},
         }
         
         metadata_file = base_name + '_metadata.json'
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
+        with open(metadata_file, 'w', encoding='utf-8', errors='replace') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
         print(f"\n[INFO] Metadata saved to: {metadata_file}")
         
         return {

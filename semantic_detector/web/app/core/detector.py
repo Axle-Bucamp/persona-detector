@@ -44,9 +44,12 @@ class DetectorService:
         if self.detector is None:
             self.initialize()
         
-        # Save text to temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write(text)
+        # Save text to temporary file with safe encoding
+        from semantic_detector.web.app.core.text_utils import parse_raw_text
+        # Sanitize text before writing
+        safe_text = parse_raw_text(text)
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', errors='replace', suffix='.txt', delete=False) as f:
+            f.write(safe_text)
             temp_path = f.name
         
         try:
@@ -199,13 +202,14 @@ class DetectorService:
         embeddings = self.detector.embedding_generator.generate_embeddings_batch(texts)
         embeddings_array = np.array(embeddings)
         
-        # Extract language fingerprints
+        # Extract language fingerprints (for analysis, not clustering)
         fingerprints = self.detector.fingerprint_extractor.extract_fingerprints_batch(texts)
         
-        # Perform clustering
+        # Perform clustering using embeddings only (fingerprints kept for analysis)
         from semantic_detector.clustering import SpeakerClusterer
         clusterer = SpeakerClusterer(n_clusters=n_clusters, method=clustering_method)
-        labels = clusterer.fit(fingerprints, embeddings_array)
+        # Pass None for features to use embeddings only
+        labels = clusterer.fit(np.zeros((len(texts), 1)), embeddings_array)  # Dummy features, embeddings used
         
         # Get cluster statistics
         cluster_stats = clusterer.get_cluster_stats(texts)

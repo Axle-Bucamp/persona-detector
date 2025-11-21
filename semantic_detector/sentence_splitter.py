@@ -87,7 +87,7 @@ class SentenceSplitter:
     
     def split_file(self, file_path: str, encoding: str = 'utf-8') -> List[str]:
         """
-        Split a text file into sentences.
+        Split a text file into sentences with safe encoding.
         
         Args:
             file_path: Path to text file
@@ -97,12 +97,28 @@ class SentenceSplitter:
             List of sentences
         """
         try:
-            with open(file_path, 'r', encoding=encoding) as f:
+            with open(file_path, 'r', encoding=encoding, errors='replace') as f:
                 text = f.read()
+            # Sanitize text before processing
+            from semantic_detector.web.app.core.text_utils import parse_raw_text
+            text = parse_raw_text(text)
             return self.split_by_period(text)
         except UnicodeDecodeError:
             # Try with different encoding
-            with open(file_path, 'r', encoding='latin-1') as f:
+            with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
                 text = f.read()
+            from semantic_detector.web.app.core.text_utils import parse_raw_text
+            text = parse_raw_text(text)
             return self.split_by_period(text)
+        except Exception as e:
+            # Final fallback: read as bytes and decode
+            try:
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                text = content.decode('utf-8', errors='replace')
+                from semantic_detector.web.app.core.text_utils import parse_raw_text
+                text = parse_raw_text(text)
+                return self.split_by_period(text)
+            except Exception:
+                raise ValueError(f"Could not read file {file_path}: {e}")
 

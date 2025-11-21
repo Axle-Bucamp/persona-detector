@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const markdownOptions = document.getElementById('markdown-options');
     const pdfOptions = document.getElementById('pdf-options');
     const pdfWarning = document.getElementById('pdf-warning');
+    const ransomChatInfo = document.getElementById('ransom-chat-info');
     const parseBtn = document.getElementById('parse-btn');
     const analyzeBtn = document.getElementById('analyze-explorer-btn');
     const exportBtn = document.getElementById('export-csv-btn');
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded', function() {
         markdownOptions.classList.add('hidden');
         pdfOptions.classList.add('hidden');
         pdfWarning.classList.add('hidden');
+        ransomChatInfo.classList.add('hidden');
         
         if (formatSelect.value === 'csv') {
             csvOptions.classList.remove('hidden');
@@ -45,6 +47,8 @@ document.addEventListener('DOMContentLoaded', function() {
         } else if (formatSelect.value === 'pdf') {
             pdfOptions.classList.remove('hidden');
             pdfWarning.classList.remove('hidden');
+        } else if (formatSelect.value === 'ransom-chat') {
+            ransomChatInfo.classList.remove('hidden');
         }
     });
     
@@ -151,6 +155,11 @@ async function handleParse() {
     } else if (formatSelect.value === 'pdf') {
         const mode = document.getElementById('pdf-mode').value;
         formData.append('markdown_mode', mode || 'sections');
+    } else if (formatSelect.value === 'ransom-chat') {
+        // Skip parse, go directly to analysis
+        handleRansomChatAnalysis(fileInput.files[0]);
+        setLoading(false);
+        return;
     }
     
     try {
@@ -269,6 +278,9 @@ async function handleAnalyzeExplorer() {
         // Display distribution visualizations
         displayDistributionCharts(data);
         
+        // Display response time histogram if available
+        displayResponseTimeHistogram(data);
+        
         // Add visualizations if available
         if (typeof addVisualizations === 'function' && data.coords_3d && data.coords_3d.length > 0) {
             // Create visualization data structure
@@ -346,8 +358,15 @@ function displayExplorerTable(data) {
     // Build table
     let tableHTML = '<table id="explorer-table" style="width: 100%; border-collapse: collapse; font-size: 0.875rem;"><thead><tr>';
     
-    // Column headers
-    const columns = [
+    // Detect if this is ransom chat data (has specific columns)
+    const isRansomChat = data.unified_data[0] && (
+        'chat_id' in data.unified_data[0] || 
+        'party' in data.unified_data[0] || 
+        'group_name' in data.unified_data[0]
+    );
+    
+    // Column headers - adjust based on data type
+    let columns = [
         'sentence_index', 'raw_text', 'cluster_id',
         'word_freq_1', 'word_freq_1_value',
         'word_freq_2', 'word_freq_2_value',
@@ -357,10 +376,29 @@ function displayExplorerTable(data) {
         'tfidf_feature_3', 'tfidf_feature_3_value'
     ];
     
+    // Add ransom chat specific columns if present
+    if (isRansomChat) {
+        columns = [
+            'chat_id', 'party', 'group_name', 'message_index',
+            'raw_text', 'cluster_id',
+            'response_time_minutes', 'price_amount', 'price_currency',
+            'word_freq_1', 'word_freq_1_value',
+            'word_freq_2', 'word_freq_2_value',
+            'word_freq_3', 'word_freq_3_value'
+        ];
+    }
+    
     const columnLabels = {
         'sentence_index': 'Index',
+        'message_index': 'Msg #',
         'raw_text': 'Text',
         'cluster_id': 'Cluster',
+        'chat_id': 'Chat ID',
+        'party': 'Party',
+        'group_name': 'Group',
+        'response_time_minutes': 'Resp Time (min)',
+        'price_amount': 'Price',
+        'price_currency': 'Currency',
         'word_freq_1': 'Word 1',
         'word_freq_1_value': 'Freq 1',
         'word_freq_2': 'Word 2',
@@ -403,6 +441,25 @@ function displayExplorerTable(data) {
             }
             if (typeof value === 'object') {
                 value = JSON.stringify(value);
+            }
+            // Format numeric values
+            if (col === 'response_time_minutes' && value !== '' && value !== null) {
+                const numVal = parseFloat(value);
+                if (!isNaN(numVal)) {
+                    if (numVal < 60) {
+                        value = numVal.toFixed(1) + ' min';
+                    } else if (numVal < 1440) {
+                        value = (numVal / 60).toFixed(1) + ' hr';
+                    } else {
+                        value = (numVal / 1440).toFixed(1) + ' days';
+                    }
+                }
+            }
+            if (col === 'price_amount' && value !== '' && value !== null) {
+                const numVal = parseFloat(value);
+                if (!isNaN(numVal)) {
+                    value = numVal.toLocaleString();
+                }
             }
             tableHTML += `<td style="padding: 0.5rem; border: 1px solid var(--border-color);">${escapeHtml(String(value))}</td>`;
         });
@@ -698,6 +755,90 @@ function renderCategoricalDistribution(container, colName, stats) {
             };
             
             Plotly.newPlot(chartId, [barChart], layout, {responsive: true});
+        }, 100);
+    }
+}
+
+// Display response time histogram
+function displayResponseTimeHistogram(data) {
+    const columnStats = data.metadata?.column_statistics || {};
+    const histogramData = columnStats['response_time_minutes_histogram'];
+    
+    if (!histogramData || !histogramData.bin_edges || histogramData.bin_edges.length === 0) {
+        return;
+    }
+    
+    const explorerResults = document.getElementById('explorer-results');
+    if (!explorerResults) return;
+    
+    // Find or create response time section
+    let rtSection = explorerResults.querySelector('#response-time-section');
+    if (!rtSection) {
+        rtSection = document.createElement('div');
+        rtSection.id = 'response-time-section';
+        rtSection.className = 'card';
+        // Insert after distributions
+        const distSection = explorerResults.querySelector('#explorer-distributions');
+        if (distSection) {
+            explorerResults.insertBefore(rtSection, distSection.nextSibling);
+        } else {
+            explorerResults.appendChild(rtSection);
+        }
+    }
+    
+    const binEdges = histogramData.bin_edges;
+    const counts = histogramData.counts;
+    
+    // Calculate bin centers for display
+    const binCenters = [];
+    for (let i = 0; i < binEdges.length - 1; i++) {
+        binCenters.push((binEdges[i] + binEdges[i + 1]) / 2);
+    }
+    
+    // Format labels (convert minutes to hours/days if needed)
+    const maxTime = Math.max(...binCenters);
+    let timeUnit = 'minutes';
+    let divisor = 1;
+    if (maxTime > 1440) {
+        timeUnit = 'days';
+        divisor = 1440;
+    } else if (maxTime > 60) {
+        timeUnit = 'hours';
+        divisor = 60;
+    }
+    
+    const labels = binCenters.map(center => (center / divisor).toFixed(1));
+    
+    rtSection.innerHTML = `
+        <h2><i class="fas fa-clock"></i> Response Time Distribution</h2>
+        <div id="response-time-chart" style="width: 100%; height: 400px;"></div>
+    `;
+    
+    if (typeof Plotly !== 'undefined') {
+        setTimeout(() => {
+            const histogram = {
+                x: binCenters.map(c => c / divisor),
+                y: counts,
+                type: 'bar',
+                marker: {
+                    color: 'rgba(99, 102, 241, 0.7)',
+                    line: {
+                        color: 'rgba(99, 102, 241, 1)',
+                        width: 1
+                    }
+                }
+            };
+            
+            const layout = {
+                title: `Response Time Distribution (${timeUnit})`,
+                xaxis: { title: `Response Time (${timeUnit})` },
+                yaxis: { title: 'Frequency' },
+                height: 400,
+                margin: { t: 40, b: 40, l: 50, r: 20 },
+                showlegend: false
+            };
+            
+            Plotly.newPlot('response-time-chart', [histogram], layout, {responsive: true});
         }, 100);
     }
 }

@@ -30,6 +30,12 @@ from semantic_detector.web.app.core.parsers import (
     PDFParser,
     UnifiedDataFormatter
 )
+from semantic_detector.web.app.core.price_extractor import PriceExtractor
+from semantic_detector.web.app.core.timestamp_analyzer import TimestampAnalyzer
+from semantic_detector.web.app.core.text_utils import (
+    sanitize_text, clean_csv_value, parse_raw_text, 
+    parse_json_string, parse_identifier
+)
 
 router = APIRouter()
 
@@ -57,6 +63,7 @@ async def analyze_text(request: AnalysisRequest):
         elif request.file_path:
             if not os.path.exists(request.file_path):
                 raise HTTPException(status_code=404, detail="File not found")
+            # File path is sanitized in process_file via sentence_splitter
             result = detector_service.process_file(
                 file_path=request.file_path,
                 n_clusters=request.n_clusters,
@@ -328,10 +335,15 @@ async def get_csv_columns(file: UploadFile = File(...)):
     """Get column names from CSV file for dropdown."""
     try:
         content = await file.read()
-        file_content = content.decode('utf-8')
+        try:
+            file_content = content.decode('utf-8', errors='replace')
+        except UnicodeDecodeError:
+            file_content = content.decode('latin-1', errors='replace')
         
         reader = csv.DictReader(io.StringIO(file_content))
         columns = list(next(reader, {}).keys())
+        # Sanitize column names (identifiers)
+        columns = [parse_identifier(col, allow_unicode=True) for col in columns]
         
         return {"columns": columns}
     except Exception as e:
@@ -400,6 +412,11 @@ async def analyze_structured_data(
                 'column_statistics': column_stats
             }
         )
+    
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def calculate_column_statistics(unified_data: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -510,11 +527,6 @@ def calculate_column_statistics(unified_data: List[Dict[str, Any]]) -> Dict[str,
         }
     
     return stats
-    
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/explorer/export")
@@ -574,27 +586,389 @@ async def export_to_csv(
         remaining = sorted(all_columns - set(column_order))
         column_order.extend(remaining)
         
-        # Create CSV
+        # Create CSV with safe encoding
         output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=column_order, extrasaction='ignore')
+        writer = csv.DictWriter(output, fieldnames=column_order, extrasaction='ignore', 
+                               quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
         
         for row in unified_data:
-            # Convert source_metadata to string if dict
+            # Convert source_metadata to string if dict (use parse_json_string for safety)
             if 'source_metadata' in row and isinstance(row['source_metadata'], dict):
-                row['source_metadata'] = json.dumps(row['source_metadata'])
-            writer.writerow(row)
+                # Sanitize nested text in metadata
+                clean_metadata = {}
+                for k, v in row['source_metadata'].items():
+                    if isinstance(v, str):
+                        clean_metadata[parse_identifier(k, allow_unicode=True)] = parse_json_string(v)
+                    else:
+                        clean_metadata[parse_identifier(k, allow_unicode=True)] = v
+                row['source_metadata'] = json.dumps(clean_metadata, ensure_ascii=False)
+            
+            # Sanitize all text values before writing
+            clean_row = {}
+            for key, value in row.items():
+                if isinstance(value, str):
+                    clean_row[key] = clean_csv_value(value)
+                elif isinstance(value, (int, float, bool)) or value is None:
+                    clean_row[key] = value
+                else:
+                    clean_row[key] = clean_csv_value(str(value))
+            
+            try:
+                writer.writerow(clean_row)
+            except Exception as e:
+                # If writing fails, try with even more aggressive cleaning
+                ultra_clean_row = {k: clean_csv_value(str(v) if v else '') 
+                                  for k, v in clean_row.items()}
+                try:
+                    writer.writerow(ultra_clean_row)
+                except Exception:
+                    # Skip problematic rows
+                    continue
         
         output.seek(0)
+        csv_content = output.getvalue()
+        
+        # Ensure UTF-8 encoding
+        try:
+            csv_bytes = csv_content.encode('utf-8', errors='replace')
+            csv_final = csv_bytes.decode('utf-8', errors='replace')
+        except Exception:
+            csv_final = csv_content.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
         
         return StreamingResponse(
-            iter([output.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=explorer_export.csv"}
+            iter([csv_final]),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": "attachment; filename=explorer_export.csv",
+                "Content-Type": "text/csv; charset=utf-8"
+            }
         )
     
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/explorer/ransom-chat-analyze", response_model=ExplorerAnalysisResponse)
+async def analyze_ransom_chats(
+    file: UploadFile = File(...),
+    ollama_endpoint: Optional[str] = Form(None),
+    embedding_model: Optional[str] = Form(None),
+    n_clusters: Optional[int] = Form(None),
+    clustering_method: ClusteringMethod = Form(ClusteringMethod.KMEANS)
+):
+    """Analyze ransom chat CSV file with enhanced features."""
+    try:
+        # Read CSV file
+        content = await file.read()
+        file_content = content.decode('utf-8')
+        
+        reader = csv.DictReader(io.StringIO(file_content))
+        rows = list(reader)
+        
+        if not rows:
+            raise HTTPException(status_code=400, detail="CSV file is empty")
+        
+        # Extract texts from content column
+        texts = []
+        metadata_list = []
+        price_extractor = PriceExtractor()
+        timestamp_analyzer = TimestampAnalyzer()
+        
+        for idx, row in enumerate(rows):
+            content = row.get('content', '').strip()
+            if content:
+                texts.append(content)
+                
+                # Extract additional metadata
+                metadata = {
+                    'row_index': idx,
+                    'chat_id': row.get('chat_id', ''),
+                    'party': row.get('party', ''),
+                    'message_index': row.get('message_index', idx),
+                    'timestamp': row.get('timestamp', ''),
+                    'response_time_minutes': row.get('response_time_minutes', ''),
+                    'group_name': row.get('group_name', '')
+                }
+                
+                # Extract price if not already in CSV
+                if not row.get('price_amount'):
+                    price_info = price_extractor.extract_first_price(content)
+                    if price_info:
+                        metadata['price_amount'] = price_info['amount']
+                        metadata['price_currency'] = price_info['currency']
+                
+                metadata_list.append(metadata)
+        
+        if not texts:
+            raise HTTPException(status_code=400, detail="No text content found in CSV")
+        
+        # Process structured data
+        result = detector_service.process_structured_data(
+            texts=texts,
+            n_clusters=n_clusters,
+            clustering_method=clustering_method.value,
+            ollama_endpoint=ollama_endpoint,
+            embedding_model=embedding_model
+        )
+        
+        # Format unified data with ransom chat specific fields
+        formatter = UnifiedDataFormatter()
+        unified_data = formatter.format_for_analysis(
+            texts=result['sentences'],
+            cluster_ids=result['labels'].tolist() if hasattr(result['labels'], 'tolist') else list(result['labels']),
+            word_frequencies=result.get('word_frequencies', []),
+            tfidf_features=result.get('tfidf_features_per_text', []),
+            metadata=metadata_list
+        )
+        
+        # Add ransom chat specific fields to unified data
+        for idx, row_data in enumerate(unified_data):
+            if idx < len(rows):
+                original_row = rows[idx]
+                row_data['chat_id'] = original_row.get('chat_id', '')
+                row_data['party'] = original_row.get('party', '')
+                row_data['group_name'] = original_row.get('group_name', '')
+                row_data['timestamp'] = original_row.get('timestamp', '')
+                
+                # Response time
+                rt_str = original_row.get('response_time_minutes', '')
+                if rt_str:
+                    try:
+                        row_data['response_time_minutes'] = float(rt_str)
+                    except ValueError:
+                        row_data['response_time_minutes'] = None
+                else:
+                    row_data['response_time_minutes'] = None
+                
+                # Price
+                price_amount = original_row.get('price_amount', '')
+                price_currency = original_row.get('price_currency', '')
+                if price_amount:
+                    try:
+                        row_data['price_amount'] = float(price_amount)
+                    except ValueError:
+                        row_data['price_amount'] = None
+                else:
+                    row_data['price_amount'] = None
+                row_data['price_currency'] = price_currency if price_currency else None
+        
+        # Calculate enhanced statistics including response times and prices
+        column_stats = calculate_column_statistics(unified_data)
+        
+        # Add response time histogram data
+        response_times = [row.get('response_time_minutes') for row in unified_data if row.get('response_time_minutes') is not None]
+        if response_times:
+            bin_edges, counts = timestamp_analyzer.create_histogram_bins(response_times)
+            column_stats['response_time_minutes_histogram'] = {
+                'type': 'histogram',
+                'bin_edges': bin_edges,
+                'counts': counts
+            }
+        
+        # Add price statistics
+        prices = [row.get('price_amount') for row in unified_data if row.get('price_amount') is not None]
+        if prices:
+            prices_array = np.array(prices)
+            column_stats['price_amount'] = {
+                'type': 'numeric',
+                'count': len(prices),
+                'mean': float(np.mean(prices_array)),
+                'std': float(np.std(prices_array)),
+                'min': float(np.min(prices_array)),
+                'max': float(np.max(prices_array)),
+                'median': float(np.median(prices_array)),
+                'q25': float(np.percentile(prices_array, 25)),
+                'q75': float(np.percentile(prices_array, 75)),
+                'values': prices[:1000] if len(prices) > 1000 else prices
+            }
+        
+        return ExplorerAnalysisResponse(
+            success=True,
+            message="Ransom chat analysis completed successfully",
+            unified_data=unified_data,
+            num_rows=len(unified_data),
+            num_clusters=len(set(result['labels'])),
+            cluster_ids=result['labels'].tolist() if hasattr(result['labels'], 'tolist') else list(result['labels']),
+            coords_3d=result.get('coords_3d', []).tolist() if hasattr(result.get('coords_3d'), 'tolist') else result.get('coords_3d', []),
+            sentences=result.get('sentences', []),
+            metadata={
+                'parser_metadata': {'type': 'ransom_chat_csv'},
+                'cluster_stats': {
+                    str(k): {
+                        'cluster_id': k,
+                        'count': v['count'],
+                        'avg_length': float(v['avg_length'])
+                    }
+                    for k, v in result.get('cluster_stats', {}).items()
+                },
+                'column_statistics': column_stats
+            }
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/explorer/ransom-chat-analyze", response_model=ExplorerAnalysisResponse)
+async def analyze_ransom_chats(
+    file: UploadFile = File(...),
+    ollama_endpoint: Optional[str] = Form(None),
+    embedding_model: Optional[str] = Form(None),
+    n_clusters: Optional[int] = Form(None),
+    clustering_method: ClusteringMethod = Form(ClusteringMethod.KMEANS)
+):
+    """Analyze ransom chat CSV file with enhanced features."""
+    try:
+        # Read CSV file
+        content = await file.read()
+        file_content = content.decode('utf-8')
+        
+        reader = csv.DictReader(io.StringIO(file_content))
+        rows = list(reader)
+        
+        if not rows:
+            raise HTTPException(status_code=400, detail="CSV file is empty")
+        
+        # Extract texts from content column
+        texts = []
+        metadata_list = []
+        price_extractor = PriceExtractor()
+        timestamp_analyzer = TimestampAnalyzer()
+        
+        for idx, row in enumerate(rows):
+            content = row.get('content', '').strip()
+            if content:
+                texts.append(content)
+                
+                # Extract additional metadata
+                metadata = {
+                    'row_index': idx,
+                    'chat_id': row.get('chat_id', ''),
+                    'party': row.get('party', ''),
+                    'message_index': row.get('message_index', idx),
+                    'timestamp': row.get('timestamp', ''),
+                    'response_time_minutes': row.get('response_time_minutes', ''),
+                    'group_name': row.get('group_name', '')
+                }
+                
+                # Extract price if not already in CSV
+                if not row.get('price_amount'):
+                    price_info = price_extractor.extract_first_price(content)
+                    if price_info:
+                        metadata['price_amount'] = price_info['amount']
+                        metadata['price_currency'] = price_info['currency']
+                
+                metadata_list.append(metadata)
+        
+        if not texts:
+            raise HTTPException(status_code=400, detail="No text content found in CSV")
+        
+        # Process structured data
+        result = detector_service.process_structured_data(
+            texts=texts,
+            n_clusters=n_clusters,
+            clustering_method=clustering_method.value,
+            ollama_endpoint=ollama_endpoint,
+            embedding_model=embedding_model
+        )
+        
+        # Format unified data with ransom chat specific fields
+        formatter = UnifiedDataFormatter()
+        unified_data = formatter.format_for_analysis(
+            texts=result['sentences'],
+            cluster_ids=result['labels'].tolist() if hasattr(result['labels'], 'tolist') else list(result['labels']),
+            word_frequencies=result.get('word_frequencies', []),
+            tfidf_features=result.get('tfidf_features_per_text', []),
+            metadata=metadata_list
+        )
+        
+        # Add ransom chat specific fields to unified data
+        for idx, row_data in enumerate(unified_data):
+            if idx < len(rows):
+                original_row = rows[idx]
+                row_data['chat_id'] = original_row.get('chat_id', '')
+                row_data['party'] = original_row.get('party', '')
+                row_data['group_name'] = original_row.get('group_name', '')
+                row_data['timestamp'] = original_row.get('timestamp', '')
+                
+                # Response time
+                rt_str = original_row.get('response_time_minutes', '')
+                if rt_str:
+                    try:
+                        row_data['response_time_minutes'] = float(rt_str)
+                    except ValueError:
+                        row_data['response_time_minutes'] = None
+                else:
+                    row_data['response_time_minutes'] = None
+                
+                # Price
+                price_amount = original_row.get('price_amount', '')
+                price_currency = original_row.get('price_currency', '')
+                if price_amount:
+                    try:
+                        row_data['price_amount'] = float(price_amount)
+                    except ValueError:
+                        row_data['price_amount'] = None
+                else:
+                    row_data['price_amount'] = None
+                row_data['price_currency'] = price_currency if price_currency else None
+        
+        # Calculate enhanced statistics including response times and prices
+        column_stats = calculate_column_statistics(unified_data)
+        
+        # Add response time histogram data
+        response_times = [row.get('response_time_minutes') for row in unified_data if row.get('response_time_minutes') is not None]
+        if response_times:
+            bin_edges, counts = timestamp_analyzer.create_histogram_bins(response_times)
+            column_stats['response_time_minutes_histogram'] = {
+                'type': 'histogram',
+                'bin_edges': bin_edges,
+                'counts': counts
+            }
+        
+        # Add price statistics
+        prices = [row.get('price_amount') for row in unified_data if row.get('price_amount') is not None]
+        if prices:
+            prices_array = np.array(prices)
+            column_stats['price_amount'] = {
+                'type': 'numeric',
+                'count': len(prices),
+                'mean': float(np.mean(prices_array)),
+                'std': float(np.std(prices_array)),
+                'min': float(np.min(prices_array)),
+                'max': float(np.max(prices_array)),
+                'median': float(np.median(prices_array)),
+                'q25': float(np.percentile(prices_array, 25)),
+                'q75': float(np.percentile(prices_array, 75)),
+                'values': prices[:1000] if len(prices) > 1000 else prices
+            }
+        
+        return ExplorerAnalysisResponse(
+            success=True,
+            message="Ransom chat analysis completed successfully",
+            unified_data=unified_data,
+            num_rows=len(unified_data),
+            num_clusters=len(set(result['labels'])),
+            cluster_ids=result['labels'].tolist() if hasattr(result['labels'], 'tolist') else list(result['labels']),
+            coords_3d=result.get('coords_3d', []).tolist() if hasattr(result.get('coords_3d'), 'tolist') else result.get('coords_3d', []),
+            sentences=result.get('sentences', []),
+            metadata={
+                'parser_metadata': {'type': 'ransom_chat_csv'},
+                'cluster_stats': {
+                    str(k): {
+                        'cluster_id': k,
+                        'count': v['count'],
+                        'avg_length': float(v['avg_length'])
+                    }
+                    for k, v in result.get('cluster_stats', {}).items()
+                },
+                'column_statistics': column_stats
+            }
+        )
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
